@@ -1,0 +1,1157 @@
+substitutions:
+  name: muse-luxe
+  friendly_name: Raspiaudio Muse Luxe
+
+  # Phases of the voice assistant. These mirror the ids used by the Home Assistant
+  # Voice PE firmware so the behaviour is the same on both devices.
+  # Ready to be triggered by a wake word
+  voice_assist_idle_phase_id: "1"
+  # Triggered, waiting for the user to start speaking
+  voice_assist_waiting_for_command_phase_id: "2"
+  # The user is speaking
+  voice_assist_listening_for_command_phase_id: "3"
+  # The command is being processed
+  voice_assist_thinking_phase_id: "4"
+  # The assistant is replying
+  voice_assist_replying_phase_id: "5"
+  # Not connected to Home Assistant yet
+  voice_assist_not_ready_phase_id: "10"
+  # Something went wrong
+  voice_assist_error_phase_id: "11"
+
+  # Sounds played locally. Pinned to a Voice PE release so a build is reproducible.
+  sounds_base: https://github.com/esphome/home-assistant-voice-pe/raw/26.9.0/sounds
+  wake_word_triggered_sound_file: ${sounds_base}/wake_word_triggered.flac
+  timer_finished_sound_file: ${sounds_base}/timer_finished.flac
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.9.0
+  name_add_mac_suffix: false
+  project:
+    name: raspiaudio.voice-assistant
+    version: "2026.9.0"
+  on_boot:
+    priority: 375
+    then:
+      # Assert the amplifier mute before anything can reach it, so the speaker
+      # stays quiet until the interval below decides otherwise.
+      - output.turn_on: amp_mute
+      - script.execute: control_leds
+      # The codec is configured in setup(), but at that point the I2S peripheral has
+      # not started and the only clock it has is the one the component routes to
+      # GPIO0. Re-run the sequence once everything else is up so a codec that came
+      # up half configured is put right.
+      - delay: 3s
+      - es8388_luxe.reinitialize: luxe_dac
+      - script.execute: control_leds
+      # If Home Assistant still has not connected after ten minutes, stop showing the
+      # "starting up" animation so the LED reflects the real state.
+      - delay: 10min
+      - if:
+          condition:
+            lambda: return id(init_in_progress);
+          then:
+            - lambda: id(init_in_progress) = false;
+            - script.execute: control_leds
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/mojansch/esphomeLuxe
+      ref: main
+    components: [es8388_luxe]
+    refresh: 1d
+
+esp32:
+  board: esp-wrover-kit
+  flash_size: 4MB
+  partitions: partitions.csv
+  framework:
+    type: esp-idf
+    version: recommended
+    advanced:
+      # Every Muse Luxe carries an ESP32 rev 3.1, so the silicon workarounds for
+      # older revisions are dead weight. Raspiaudio's own firmware sets both of these.
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+    sdkconfig_options:
+      # The Luxe exposes UART0 on its USB port; keep the console there for logs
+      # and for the serial part of the initial Wi-Fi provisioning.
+      CONFIG_ESP_CONSOLE_USB_CDC: "n"
+      CONFIG_ESP_CONSOLE_UART_DEFAULT: "y"
+      CONFIG_ESP_CONSOLE_UART_NUM: "0"
+      CONFIG_ESP_CONSOLE_UART_BAUDRATE: "115200"
+      # Deliberately NOT setting CONFIG_SPIRAM_RODATA / CONFIG_SPIRAM_FETCH_INSTRUCTIONS.
+      # They are a win on the Voice PE, which has octal PSRAM on an ESP32-S3. The Luxe
+      # has quad PSRAM on a plain ESP32, where running code out of PSRAM is much slower
+      # than executing it from flash, and it stalls the audio pipeline badly.
+
+psram:
+  mode: quad
+  # 40MHz, not 80: on this chip PSRAM cannot outrun the flash clock, and flash runs
+  # at 40MHz. Asking for 80MHz here is silently capped back to 40MHz, so the higher
+  # number only looks good in the config. Raising both would need
+  # CONFIG_ESPTOOLPY_FLASHFREQ_80M and a full reflash to take effect.
+  speed: 40MHz
+
+logger:
+  level: DEBUG
+  hardware_uart: UART0
+  logs:
+    sensor: WARN
+
+api:
+  id: api_id
+  # Sendspin playback has to survive Home Assistant going away for a while.
+  reboot_timeout: 0s
+  # No key is set here: Home Assistant generates and stores one when the device is
+  # adopted, which is what a distributed firmware image should do.
+  encryption:
+  on_client_connected:
+    - script.execute: control_leds
+  on_client_disconnected:
+    - script.execute: control_leds
+
+wifi:
+  id: wifi_id
+  # Power saving off, and transmit power left at the radio's own maximum. The stock
+  # config pinned output_power to 15dB, about 5dB below maximum, which costs roughly
+  # half the usable range on a device that gets carried around.
+  power_save_mode: none
+  ap:
+    ssid: "Raspiaudio-luxe"
+    password: "12345678"
+  on_connect:
+    - script.execute: control_leds
+  on_disconnect:
+    - script.execute: control_leds
+
+captive_portal:
+
+# Disable during debugging to free UART0 for logs
+improv_serial:
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+  - platform: http_request
+    id: ota_http_request
+
+http_request:
+  # A firmware image is ~2 MB over TLS on a 240 MHz ESP32; the default timeout is
+  # not enough to pull one down on a busy network.
+  timeout: 10s
+
+update:
+  - platform: http_request
+    id: update_http_request
+    name: Firmware
+    source: https://raw.githubusercontent.com/mojansch/esphomeLuxe/main/manifest_update.json
+
+##############################################################################
+# Hardware
+##############################################################################
+
+i2c:
+  id: internal_i2c
+  sda: GPIO18
+  scl: GPIO23
+
+audio_dac:
+  - platform: es8388_luxe
+    id: luxe_dac
+    i2c_id: internal_i2c
+
+i2s_audio:
+  id: i2s0
+  i2s_lrclk_pin: GPIO25
+  i2s_bclk_pin: GPIO5
+  i2s_mclk_pin: GPIO0
+
+# GPIO21 mutes the amplifier that follows the codec. Keeping it asserted while
+# nothing is playing keeps the internal speaker from hissing.
+output:
+  - platform: gpio
+    id: amp_mute
+    pin:
+      number: GPIO21
+      inverted: true
+      mode:
+        output: true
+
+microphone:
+  - platform: i2s_audio
+    id: luxe_mic
+    i2s_audio_id: i2s0
+    i2s_din_pin: GPIO35
+    adc_type: external
+    pdm: false
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    channel: stereo
+
+speaker:
+  # Hardware output. Volume and mute are handed to the codec rather than applied
+  # to the samples, so nothing is lost to software scaling.
+  - platform: i2s_audio
+    id: luxe_speaker
+    i2s_audio_id: i2s0
+    i2s_dout_pin: GPIO26
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    # The Luxe is a genuine stereo cabinet: two 52mm drivers, one per channel.
+    channel: stereo
+    # Cushion against network jitter while streaming: an empty buffer is a gap in
+    # the music. 200ms of 48kHz stereo 16-bit is ~38kB.
+    buffer_duration: 200ms
+    # How long the speaker keeps the shared I2S bus after the last sample. The
+    # microphone cannot start until it lets go, so this is wake-to-listen latency.
+    # Stopping it explicitly instead does not work: the mixer immediately restarts
+    # its output speaker, and with no timeout the bus is then never released.
+    timeout: 200ms
+    audio_dac: luxe_dac
+
+  # Combines the announcement and media streams into the single hardware output,
+  # which is what lets an announcement duck music instead of cutting it off.
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: luxe_speaker
+    num_channels: 2
+    task_stack_in_psram: true
+    source_speakers:
+      - id: announcement_mixing_input
+        timeout: never
+      - id: media_mixing_input
+        timeout: never
+
+  # The mixer needs both inputs at one sample rate; these convert if needed.
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+audio_file:
+  - id: wake_word_triggered_sound
+    file: ${wake_word_triggered_sound_file}
+  - id: timer_finished_sound
+    file: ${timer_finished_sound_file}
+
+sendspin:
+  id: sendspin_hub
+
+media_source:
+  - platform: audio_file
+    id: audio_file_announcement_source
+  - platform: audio_http
+    id: http_announcement_source
+    buffer_size: 250000
+  - platform: audio_http
+    id: http_media_source
+    buffer_size: 500000
+  - platform: sendspin
+    id: sendspin_media_source
+
+media_player:
+  # Deliberately unnamed, so it stays off Home Assistant's entity list. This is the
+  # transport Music Assistant uses for synchronised group playback; it feeds the
+  # speaker_source player below rather than being a second speaker. Naming it gives
+  # the device two media player entities that fight over one set of drivers.
+  - platform: sendspin
+    id: sendspin_group_media_player
+    # Sendspin is a synchronised protocol: it hands the stream over on a timing
+    # budget, and if the speaker is still waiting for the microphone to let go of
+    # the I2S bus it misses the window and the server drops the connection. This
+    # player changes state at the handshake, a couple of hundred milliseconds
+    # before audio arrives, so it is the earliest warning available.
+    on_play:
+      - script.execute: release_bus_for_playback
+    on_idle:
+      - script.execute: reclaim_bus_for_microphone
+  - platform: speaker_source
+    id: external_media_player
+    name: Media Player
+    announcement_pipeline:
+      speaker: announcement_resampling_speaker
+      format: FLAC # Cheapest codec to decode, and half the bandwidth of WAV
+      num_channels: 1 # Announcements do not need stereo
+      sample_rate: 48000
+      sources:
+        - audio_file_announcement_source
+        - http_announcement_source
+    media_pipeline:
+      speaker: media_resampling_speaker
+      format: FLAC
+      num_channels: 2
+      sample_rate: 48000
+      sources:
+        - http_media_source
+        - sendspin_media_source
+    volume_increment: 0.05
+    volume_initial: 0.6
+    volume_min: 0.1
+    volume_max: 1.0
+    on_mute:
+      - script.execute: control_leds
+    on_unmute:
+      - script.execute: control_leds
+    on_volume:
+      - script.execute: control_leds
+    on_announcement:
+      - output.turn_off: amp_mute
+      - script.execute: release_bus_for_playback
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+    on_play:
+      - output.turn_off: amp_mute
+      - script.execute: release_bus_for_playback
+    on_idle:
+      - script.execute: reclaim_bus_for_microphone
+    on_pause:
+      - script.execute: reclaim_bus_for_microphone
+    on_state:
+      - script.execute: control_leds
+      - if:
+          condition:
+            and:
+              - switch.is_off: timer_ringing
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: external_media_player
+          then:
+            - mixer_speaker.apply_ducking:
+                id: media_mixing_input
+                decibel_reduction: 0
+                duration: 1.0s
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: top_led
+    name: LED
+    pin: GPIO22
+    chipset: WS2812
+    num_leds: 1
+    channel_colors: GRB
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+    effects:
+      - pulse:
+          name: pulse
+          transition_length: 250ms
+          update_interval: 250ms
+      - pulse:
+          name: fast_pulse
+          transition_length: 100ms
+          update_interval: 100ms
+      - pulse:
+          name: slow_pulse
+          transition_length: 1s
+          update_interval: 2s
+
+##############################################################################
+# Voice assistant
+##############################################################################
+
+micro_wake_word:
+  id: mww
+  microphone:
+    microphone: luxe_mic
+    channels: 0
+    # Left at unity: the codec's analogue boost already drives this hot, and adding
+    # digital gain on top of it costs false wakes.
+    gain_factor: 1
+  stop_after_detection: false
+  models:
+    - model: okay_nabu
+      id: okay_nabu
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+  vad:
+  on_wake_word_detected:
+    - if:
+        condition:
+          switch.is_off: master_mute_switch
+        then:
+          # A ringing timer is stopped by the wake word rather than starting a new
+          # conversation, so "okay nabu" silences the alarm.
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+              else:
+                - if:
+                    condition:
+                      voice_assistant.is_running:
+                    then:
+                      - voice_assistant.stop:
+                    else:
+                      - if:
+                          condition:
+                            media_player.is_announcing: external_media_player
+                          then:
+                            - media_player.stop:
+                                id: external_media_player
+                                announcement: true
+                          else:
+                            - if:
+                                condition:
+                                  switch.is_on: wake_sound
+                                then:
+                                  - script.execute:
+                                      id: play_sound
+                                      priority: true
+                                      sound_file: "wake_word_triggered_sound"
+                                  # Wait for the chime to finish rather than just
+                                  # pausing: it holds the I2S bus the microphone
+                                  # is about to need.
+                                  - wait_until:
+                                      condition:
+                                        media_player.is_announcing: external_media_player
+                                      timeout: 1s
+                                  - wait_until:
+                                      condition:
+                                        not:
+                                          media_player.is_announcing: external_media_player
+                                      timeout: 3s
+                                  - script.execute: wait_for_bus_release
+                                  - script.wait: wait_for_bus_release
+                            - voice_assistant.start:
+                                wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: luxe_mic
+    channels: 0
+  media_player: external_media_player
+  micro_wake_word: mww
+  # Gain staging is board specific: the ES8388 already applies +24 dB of analogue
+  # microphone boost and a noise gate before any of this. These are the values this
+  # device has always used. The Voice PE, whose front end does its own conditioning,
+  # runs 0 / 0dBFS / 1.0 instead; if speech recognition is poor, this is the first
+  # place to look.
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+
+  on_client_connected:
+    - lambda: id(init_in_progress) = false;
+    - micro_wake_word.start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+  on_client_disconnected:
+    - voice_assistant.stop:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+    - script.execute: control_leds
+
+  on_start:
+    - micro_wake_word.stop:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 20
+        duration: 0.0s
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+  on_intent_progress:
+    - if:
+        condition:
+          # A non-empty x means a streaming TTS url reached the media player
+          lambda: return !x.empty();
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+  on_tts_start:
+    # The reply is about to play, so the microphone has to let go of the I2S bus.
+    - script.execute: release_bus_for_playback
+    - if:
+        condition:
+          lambda: return id(voice_assistant_phase) != ${voice_assist_replying_phase_id};
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+  on_end:
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 0
+        duration: 1.0s
+    - if:
+        condition:
+          lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+        then:
+          - delay: 1s
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+    - script.execute: reclaim_bus_for_microphone
+  on_error:
+    # These two codes are normal outcomes rather than faults, so they do not get
+    # the error colour.
+    - if:
+        condition:
+          and:
+            - lambda: return !id(init_in_progress);
+            - lambda: return code != "duplicate_wake_up_detected";
+            - lambda: return code != "stt-no-text-recognized";
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          - script.execute: control_leds
+
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+  on_timer_started:
+    - script.execute: control_leds
+  on_timer_cancelled:
+    - script.execute: control_leds
+  on_timer_updated:
+    - script.execute: control_leds
+
+select:
+  - platform: template
+    id: wake_word_sensitivity
+    name: Wake word sensitivity
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      # Probability cutoffs computed per model as quantized uint8 values; the
+      # comment on each line gives the floating point cutoff and the measured
+      # false accepts per hour on the Dinner Party Corpus.
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH
+          id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH
+          id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);    // 0.69 -> 0.376 FAPH
+          id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH
+          id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);    // 0.56 -> 0.751 FAPH
+          id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH
+          id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH
+        }
+
+##############################################################################
+# Controls and state
+##############################################################################
+
+globals:
+  # True until Home Assistant connects for the first time after a boot.
+  - id: init_in_progress
+    type: bool
+    restore_value: false
+    initial_value: "true"
+  - id: voice_assistant_phase
+    type: int
+    restore_value: false
+    initial_value: ${voice_assist_not_ready_phase_id}
+
+switch:
+  # Software microphone mute, exposed to Home Assistant.
+  - platform: template
+    id: master_mute_switch
+    name: Mute
+    icon: "mdi:microphone-off"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: return id(luxe_mic)->get_mute_state();
+    turn_on_action:
+      - microphone.mute: luxe_mic
+      - micro_wake_word.stop:
+    turn_off_action:
+      - microphone.unmute: luxe_mic
+      - script.execute: reclaim_bus_for_microphone
+    on_turn_on:
+      - script.execute: control_leds
+    on_turn_off:
+      - script.execute: control_leds
+
+  - platform: template
+    id: wake_sound
+    name: Wake sound
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # Internal flag tracking a timer that is currently ringing on the device.
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+      - script.execute: ring_timer
+      - script.execute: control_leds
+      # Give up after fifteen minutes rather than ringing forever.
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+    on_turn_off:
+      - script.execute: disable_repeat
+      - if:
+          condition:
+            media_player.is_announcing: external_media_player
+          then:
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      - script.execute: control_leds
+
+binary_sensor:
+  # Headphone jack. The pin idles high through its pull-up and is pulled low when
+  # a plug is inserted.
+  - platform: gpio
+    id: jack_detect
+    internal: true
+    pin:
+      number: GPIO27
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - es8388_luxe.set_output_route:
+          id: luxe_dac
+          route: speaker
+    on_release:
+      - es8388_luxe.set_output_route:
+          id: luxe_dac
+          route: headphone
+
+  - platform: gpio
+    id: volume_up_button
+    name: Volume up
+    disabled_by_default: true
+    pin:
+      number: GPIO19
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    # One step per press, then repeat for as long as the button is held.
+    on_press:
+      - media_player.volume_up: external_media_player
+      - delay: 600ms
+      - while:
+          condition:
+            binary_sensor.is_on: volume_up_button
+          then:
+            - media_player.volume_up: external_media_player
+            - delay: 150ms
+
+  - platform: gpio
+    id: volume_down_button
+    name: Volume down
+    disabled_by_default: true
+    pin:
+      number: GPIO32
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    # One step per press, then repeat for as long as the button is held.
+    on_press:
+      - media_player.volume_down: external_media_player
+      - delay: 600ms
+      - while:
+          condition:
+            binary_sensor.is_on: volume_down_button
+          then:
+            - media_player.volume_down: external_media_player
+            - delay: 150ms
+
+  # Centre button. GPIO12 is a strapping pin, so it is only ever read.
+  - platform: gpio
+    id: center_button
+    name: Center button
+    disabled_by_default: true
+    pin:
+      number: GPIO12
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    on_multi_click:
+      # Single press: stop whatever is happening, or start the assistant if it is
+      # idle. Same precedence as the Voice PE centre button.
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.25s
+        then:
+          - if:
+              condition:
+                lambda: return !id(init_in_progress);
+              then:
+                - if:
+                    condition:
+                      switch.is_on: timer_ringing
+                    then:
+                      - switch.turn_off: timer_ringing
+                    else:
+                      - if:
+                          condition:
+                            voice_assistant.is_running:
+                          then:
+                            - voice_assistant.stop:
+                          else:
+                            - if:
+                                condition:
+                                  media_player.is_announcing: external_media_player
+                                then:
+                                  - media_player.stop:
+                                      id: external_media_player
+                                      announcement: true
+                                else:
+                                  - if:
+                                      condition:
+                                        media_player.is_playing: external_media_player
+                                      then:
+                                        - media_player.pause: external_media_player
+                                      else:
+                                        - if:
+                                            condition:
+                                              switch.is_off: master_mute_switch
+                                            then:
+                                              - script.execute:
+                                                  id: play_sound
+                                                  priority: true
+                                                  sound_file: "wake_word_triggered_sound"
+                                              - wait_until:
+                                                  condition:
+                                                    media_player.is_announcing: external_media_player
+                                                  timeout: 1s
+                                              - wait_until:
+                                                  condition:
+                                                    not:
+                                                      media_player.is_announcing: external_media_player
+                                                  timeout: 3s
+                                              - script.execute: wait_for_bus_release
+                                              - script.wait: wait_for_bus_release
+                                              - voice_assistant.start:
+      # Double press: toggle the microphone mute.
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 0.25s
+          - ON for at most 1s
+          - OFF for at least 0.25s
+        then:
+          - if:
+              condition:
+                lambda: return !id(init_in_progress);
+              then:
+                - switch.toggle: master_mute_switch
+      # Long press: resume or pause whatever the media player was doing.
+      - timing:
+          - ON for at least 1s
+        then:
+          - if:
+              condition:
+                lambda: return !id(init_in_progress);
+              then:
+                - media_player.toggle: external_media_player
+
+sensor:
+  - platform: wifi_signal
+    id: wifi_signal_db
+    name: Wi-Fi signal
+    entity_category: diagnostic
+    update_interval: 30s
+
+  - platform: adc
+    id: battery_voltage
+    pin: GPIO33
+    name: Battery voltage
+    device_class: voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 15s
+    attenuation: auto
+    filters:
+      # The battery sits behind a 1:1 divider
+      - multiply: 2
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          # Map measured full charge to real value to compensate divider/ADC bias
+          - 4.58 -> 4.20
+      - exponential_moving_average:
+          alpha: 0.2
+          send_every: 2
+      - delta: 0.002
+    on_value:
+      - sensor.template.publish:
+          id: battery_percent
+          state: !lambda return x;
+
+  - platform: template
+    id: battery_percent
+    name: Battery
+    device_class: battery
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 15s
+    filters:
+      - calibrate_polynomial:
+          degree: 3
+          datapoints:
+            - 4.20 -> 100.0
+            - 4.13 -> 97.1
+            - 4.10 -> 94.2
+            - 4.07 -> 88.4
+            - 4.05 -> 82.7
+            - 4.04 -> 76.9
+            - 4.01 -> 65.3
+            - 3.99 -> 59.5
+            - 3.95 -> 53.8
+            - 3.93 -> 48.0
+            - 3.91 -> 42.2
+            - 3.88 -> 36.4
+            - 3.86 -> 30.6
+            - 3.84 -> 24.9
+            - 3.82 -> 19.1
+            - 3.76 -> 13.3
+            - 3.73 -> 10.4
+            - 3.70 -> 7.5
+            - 3.64 -> 4.6
+            - 3.50 -> 1.7
+            - 3.00 -> 0.0
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+button:
+  - platform: restart
+    id: restart_button
+    name: Restart
+    entity_category: config
+    disabled_by_default: true
+    icon: "mdi:restart"
+  - platform: factory_reset
+    id: factory_reset_button
+    name: Factory reset
+    entity_category: diagnostic
+    disabled_by_default: true
+
+##############################################################################
+# Scripts
+##############################################################################
+
+interval:
+  # Keep the amplifier muted while nothing is playing, so the speaker does not hiss.
+  #
+  # Unmuting has to lead the audio rather than follow it: waiting for the speaker to
+  # actually clock samples out means the first fraction of a second of every reply is
+  # played into a muted amplifier and lost. The media player announces its intent
+  # before any sample arrives, so that is what this follows.
+  - interval: 50ms
+    then:
+      - if:
+          condition:
+            or:
+              - speaker.is_playing: luxe_speaker
+              - media_player.is_announcing: external_media_player
+              - media_player.is_playing: external_media_player
+          then:
+            - output.turn_off: amp_mute
+          else:
+            - if:
+                condition:
+                  speaker.is_stopped: luxe_speaker
+                then:
+                  - output.turn_on: amp_mute
+
+script:
+  # Single entry point for the LED. Everything that can change what the LED should
+  # show calls this, and the order below is the precedence.
+  - id: control_leds
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(init_in_progress)) {
+            id(led_starting).execute();
+          } else if (!id(wifi_id).is_connected() || !id(api_id).is_connected()) {
+            id(led_no_connection).execute();
+          } else if (id(timer_ringing).state) {
+            id(led_timer_ringing).execute();
+          } else if (id(master_mute_switch).state) {
+            id(led_muted).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_error_phase_id}) {
+            id(led_error).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_waiting_for_command_phase_id}) {
+            id(led_waiting_for_command).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id}) {
+            id(led_listening_for_command).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_thinking_phase_id}) {
+            id(led_thinking).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_replying_phase_id}) {
+            id(led_replying).execute();
+          } else if (id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING) {
+            id(led_media_playing).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_not_ready_phase_id}) {
+            id(led_no_connection).execute();
+          } else {
+            id(led_idle).execute();
+          }
+
+  - id: led_starting
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 80%
+          green: 0%
+          blue: 80%
+          brightness: 60%
+          effect: slow_pulse
+
+  - id: led_no_connection
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 100%
+          green: 40%
+          blue: 0%
+          brightness: 60%
+          effect: slow_pulse
+
+  - id: led_muted
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 100%
+          green: 0%
+          blue: 0%
+          brightness: 30%
+          effect: none
+
+  - id: led_idle
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 0%
+          green: 0%
+          blue: 100%
+          brightness: 60%
+          effect: none
+
+  - id: led_waiting_for_command
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 0%
+          green: 100%
+          blue: 0%
+          brightness: 100%
+          effect: none
+
+  - id: led_listening_for_command
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 0%
+          green: 100%
+          blue: 0%
+          brightness: 100%
+          effect: pulse
+
+  - id: led_thinking
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 20%
+          green: 20%
+          blue: 100%
+          brightness: 100%
+          effect: fast_pulse
+
+  - id: led_replying
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 100%
+          green: 100%
+          blue: 0%
+          brightness: 100%
+          effect: none
+
+  - id: led_media_playing
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 80%
+          green: 40%
+          blue: 0%
+          brightness: 60%
+          effect: none
+
+  - id: led_timer_ringing
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 100%
+          green: 30%
+          blue: 0%
+          brightness: 100%
+          effect: fast_pulse
+
+  - id: led_error
+    then:
+      - light.turn_on:
+          id: top_led
+          red: 100%
+          green: 0%
+          blue: 0%
+          brightness: 100%
+          effect: pulse
+
+  # Plays one of the embedded sounds as an announcement. `priority` cuts off an
+  # announcement that is already playing instead of being dropped.
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: string
+    then:
+      - if:
+          condition:
+            lambda: return priority;
+          then:
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - lambda: |-
+          if ((id(external_media_player).state != media_player::MEDIA_PLAYER_STATE_ANNOUNCING) || priority) {
+            id(external_media_player)
+              ->make_call()
+              .set_media_url("audio-file://" + sound_file)
+              .set_announcement(true)
+              .perform();
+          }
+
+  - id: ring_timer
+    then:
+      - script.execute: enable_repeat_one
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: "timer_finished_sound"
+
+  - id: enable_repeat_one
+    then:
+      - media_player.repeat_one:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 500ms
+
+  - id: disable_repeat
+    then:
+      - media_player.repeat_off:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 0ms
+
+  # The Muse Luxe wires the microphone and the speaker to one I2S peripheral, and
+  # ESPHome's i2s_audio bus allows a single direction at a time. Wake word detection
+  # therefore has to release the bus before anything can be played, and take it back
+  # when playback is over. These two scripts are that hand-off.
+  - id: release_bus_for_playback
+    mode: restart
+    then:
+      - micro_wake_word.stop:
+      - wait_until:
+          condition:
+            not:
+              micro_wake_word.is_running:
+          timeout: 2s
+      # Wake word detection reporting stopped is not the same as the microphone
+      # driver having let go of the I2S bus; the speaker fails to start in the gap
+      # between the two and then sits out a full retry second.
+      - wait_until:
+          condition:
+            not:
+              microphone.is_capturing: luxe_mic
+          timeout: 2s
+
+  - id: reclaim_bus_for_microphone
+    mode: restart
+    then:
+      # A conversation that is about to start has not registered yet: the wake
+      # chime finishes a moment before voice_assistant.start runs, so checking
+      # immediately would restart detection straight into the conversation.
+      - delay: 500ms
+      # Wait for everything that wants the speaker to be finished with it.
+      - wait_until:
+          condition:
+            and:
+              - not:
+                  media_player.is_announcing: external_media_player
+              - not:
+                  media_player.is_playing: external_media_player
+              - not:
+                  voice_assistant.is_running:
+          timeout: 30s
+      - script.execute: wait_for_bus_release
+      - script.wait: wait_for_bus_release
+      - if:
+          condition:
+            and:
+              - switch.is_off: master_mute_switch
+              - api.connected:
+              - not:
+                  micro_wake_word.is_running:
+          then:
+            - micro_wake_word.start:
+
+  # The media player reporting idle is not the same as the bus being free: the
+  # speaker keeps its I2S claim until it is stopped. Starting the microphone before
+  # that fails and costs a full retry second, so ask for the bus back and wait for
+  # it rather than guessing at a delay.
+  - id: wait_for_bus_release
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            speaker.is_stopped: luxe_speaker
+          timeout: 3s

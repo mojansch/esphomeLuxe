@@ -1,15 +1,16 @@
 {
-  "name": "raspiaudio.voice-assistant",
-  "version": "2025.3.1",
+  "name": "Raspiaudio Muse Luxe Voice Satellite",
+  "version": "2026.9.0",
   "builds": [
     {
       "chipFamily": "ESP32",
       "ota": {
-         "md5": "147c31aae0951c2710751c5410970b68",  
-         "path": "https://raw.githubusercontent.com/RASPIAUDIO/esphomeLuxe/main/update_firmware.bin",
-         "offset": 0,
-         "summary": "Latest firmware"
-         }
+        "md5": "00000000000000000000000000000000",
+        "path": "https://github.com/mojansch/esphomeLuxe/releases/latest/download/muse-luxe.ota.bin",
+        "offset": 0,
+        "summary": "Voice PE feature parity: FLAC media, announcement ducking, voice timers, stop word",
+        "release_url": "https://github.com/mojansch/esphomeLuxe/releases/latest"
+      }
     }
-    ]     
+  ]
 }

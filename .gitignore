@@ -1,5 +1,13 @@
-# Gitignore settings for ESPHome
-# This is an example and may include too much for your use-case.
-# You can modify this file to suit your needs.
+# ESPHome build output
 /.esphome/
+/build/
 /secrets.yaml
+
+# Firmware images are published as GitHub release assets, not committed
+*.bin
+
+# Python bytecode from the local external component
+__pycache__/
+*.py[cod]
+
+.DS_Store
