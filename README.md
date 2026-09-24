@@ -142,6 +142,14 @@ external_components:
     components: [es8388_luxe]
 ```
 
+### Known limitations
+
+| | |
+| --- | --- |
+| No barge-in, no "stop" word | Shared I2S bus; see [One bus, shared](#one-bus-shared). Tracked upstream in [#16882](https://github.com/esphome/esphome/pull/16882). |
+| Announcements lag a Voice PE by ~0.5s | HTTP connect to Home Assistant's transcoding proxy plus decoder start. An ESP32 will not win this against an ESP32-S3. |
+| Headphone jack routing is untested | The codec switches routes on jack detect, but nobody has listened to it. |
+
 ### Equalisation
 
 There is none in the firmware. Use Music Assistant's DSP if you want it — that is
@@ -226,8 +234,23 @@ what `release_bus_for_playback` and `reclaim_bus_for_microphone` do.
 
 The visible consequence is that this device cannot detect a wake word while it is
 talking, so there is no barging in on a reply and no "stop" wake word. Use the
-centre button. The Home Assistant Voice PE manages both because it has two
-separate I2S buses; on this hardware it is not possible.
+centre button instead.
+
+This is an ESPHome limitation rather than a hardware one, which is worth stating
+precisely because it is fixable. ESP-IDF allocates a transmit and a receive
+channel on one I2S port in a single call, and the Luxe is wired for exactly that:
+shared BCLK, LRCLK and MCLK with separate data lines into and out of a
+full-duplex codec. ESPHome's `i2s_audio` just does not use it that way - the
+microphone and the speaker each allocate their own channel, so a mutex has to
+keep them apart.
+
+[esphome/esphome#16882](https://github.com/esphome/esphome/pull/16882) implements
+full duplex for shared-bus voice assistants, including a resampler microphone
+platform for the case here where the microphone runs at 16kHz and the speaker at
+48kHz. It is not merged: no reviews since June 2026, and at least one user
+reports it broken on 2026.9.0, the version this firmware targets. Worth watching
+rather than adopting. If it lands, barge-in and the stop word become possible and
+the whole bus hand-off below can be deleted, along with the latency it costs.
 
 ## Support
 
