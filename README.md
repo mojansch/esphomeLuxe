@@ -146,7 +146,7 @@ external_components:
 
 | | |
 | --- | --- |
-| No barge-in, no "stop" word | Shared I2S bus; see [One bus, shared](#one-bus-shared). Tracked upstream in [#16882](https://github.com/esphome/esphome/pull/16882). |
+| No barge-in, no "stop" word | Shared I2S bus; see [One bus, shared](#one-bus-shared). Both known fixes need an ESP32-S3 or newer. |
 | Announcements lag a Voice PE by ~0.5s | HTTP connect to Home Assistant's transcoding proxy plus decoder start. An ESP32 will not win this against an ESP32-S3. |
 | Headphone jack routing is untested | The codec switches routes on jack detect, but nobody has listened to it. |
 
@@ -244,13 +244,25 @@ full-duplex codec. ESPHome's `i2s_audio` just does not use it that way - the
 microphone and the speaker each allocate their own channel, so a mutex has to
 keep them apart.
 
-[esphome/esphome#16882](https://github.com/esphome/esphome/pull/16882) implements
-full duplex for shared-bus voice assistants, including a resampler microphone
-platform for the case here where the microphone runs at 16kHz and the speaker at
-48kHz. It is not merged: no reviews since June 2026, and at least one user
-reports it broken on 2026.9.0, the version this firmware targets. Worth watching
-rather than adopting. If it lands, barge-in and the stop word become possible and
-the whole bus hand-off below can be deleted, along with the latency it costs.
+Two projects address this, and neither is usable here today:
+
+- [esphome/esphome#16882](https://github.com/esphome/esphome/pull/16882)
+  implements full duplex for shared-bus voice assistants, including a resampler
+  microphone platform for the case here where the microphone runs at 16kHz and
+  the speaker at 48kHz. Unreviewed since June 2026, and reported broken on
+  2026.9.0, which is the version this firmware targets.
+- [esphome-audio-stack](https://github.com/n-IA-hane/esphome-audio-stack) is a
+  maintained external component that takes ownership of the I2S bus and the codec
+  and hands normal ESPHome `microphone` and `speaker` platforms back. Its
+  "single-bus codec" topology is exactly this board, and it drives the ES8388
+  directly, so it would replace `es8388_luxe` as well. It requires an ESP32-S3 or
+  ESP32-P4 and refuses to validate on a plain ESP32.
+
+So full duplex needs newer silicon than the Luxe has, at least until someone
+teaches one of them about the original ESP32. If that happens, barge-in and the
+stop word become possible and the whole bus hand-off below can be deleted, along
+with the latency it costs. Anyone rebuilding this design around an S3 should
+start from esphome-audio-stack rather than from this configuration.
 
 ## Support
 
