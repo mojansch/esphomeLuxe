@@ -1,11 +1,11 @@
 {
   "name": "Raspiaudio Muse Luxe Voice Satellite",
-  "version": "2026.9.1",
+  "version": "2026.9.2",
   "builds": [
     {
       "chipFamily": "ESP32",
       "ota": {
-        "md5": "b8ed97994419b3cee085fc6c87c031ec",
+        "md5": "f07035906c42af41d132cb8b39efe896",
         "path": "https://github.com/mojansch/esphomeLuxe/releases/latest/download/muse-luxe.ota.bin",
         "offset": 0,
         "summary": "Voice PE feature parity: FLAC media, announcement ducking, voice timers, Sendspin multi-room",
