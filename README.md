@@ -61,6 +61,13 @@ The device polls `manifest_update.json` in this repository and exposes a
 **Firmware** update entity in Home Assistant, so later releases install
 themselves from there.
 
+> **Updating from a release before 2026.9.2 needs one USB reflash.** From 2026.9.2
+> the SPI bus runs at 80MHz instead of 40MHz, which is what lets an announcement
+> play over music without crackling. That clock is set by the bootloader, and an
+> over-the-air update only replaces the app partition — so a device updated over
+> the air keeps running at 40MHz. It is perfectly safe, it just does not get the
+> benefit until `muse-luxe.factory.bin` is written over USB once.
+
 To flash your own build directly instead:
 
 ```bash
@@ -167,6 +174,12 @@ The script builds, refuses to publish an image that no longer fits the app
 partition, creates the GitHub release with both images attached, and writes the
 version and checksum into the manifest. `tools/release.sh --dry-run` builds and
 reports the size without publishing.
+
+Flash and PSRAM share one SPI controller on this chip, and the build runs both at
+80MHz. Mixing two decoded audio streams here is bandwidth bound rather than CPU
+bound, so that clock is the difference between clean announcements over music and
+audible crackle. Since the bootloader owns the setting, changing it only takes
+effect through a USB flash.
 
 The app partition is 0x1F0000 bytes and the build uses most of it. **Do not change
 the partition table**: an over-the-air update writes into the layout the device

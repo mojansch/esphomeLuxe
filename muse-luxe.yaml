@@ -31,7 +31,7 @@ esphome:
   name_add_mac_suffix: false
   project:
     name: raspiaudio.voice-assistant
-    version: "2026.9.1"
+    version: "2026.9.2"
   on_boot:
     priority: 375
     then:
@@ -83,6 +83,18 @@ esp32:
       CONFIG_ESP_CONSOLE_UART_DEFAULT: "y"
       CONFIG_ESP_CONSOLE_UART_NUM: "0"
       CONFIG_ESP_CONSOLE_UART_BAUDRATE: "115200"
+      # Run the SPI bus at 80MHz rather than the 40MHz default. Flash and PSRAM
+      # share one controller and one clock on this chip, so this doubles the
+      # bandwidth available to both code execution and every audio buffer. It is
+      # what makes an announcement over music play without crackling: mixing two
+      # decoded streams is bandwidth bound here, not CPU bound.
+      #
+      # The bootloader establishes this clock, and an over-the-air update replaces
+      # only the app partition. A device updated over the air keeps its old
+      # bootloader and goes on running at 40MHz - safe, but without the benefit.
+      # Reflashing muse-luxe.factory.bin over USB is what actually applies it.
+      CONFIG_ESPTOOLPY_FLASHFREQ_80M: "y"
+      CONFIG_ESPTOOLPY_FLASHFREQ: "80m"
       # Deliberately NOT setting CONFIG_SPIRAM_RODATA / CONFIG_SPIRAM_FETCH_INSTRUCTIONS.
       # They are a win on the Voice PE, which has octal PSRAM on an ESP32-S3. The Luxe
       # has quad PSRAM on a plain ESP32, where running code out of PSRAM is much slower
@@ -90,11 +102,9 @@ esp32:
 
 psram:
   mode: quad
-  # 40MHz, not 80: on this chip PSRAM cannot outrun the flash clock, and flash runs
-  # at 40MHz. Asking for 80MHz here is silently capped back to 40MHz, so the higher
-  # number only looks good in the config. Raising both would need
-  # CONFIG_ESPTOOLPY_FLASHFREQ_80M and a full reflash to take effect.
-  speed: 40MHz
+  # PSRAM cannot outrun the flash clock on this chip; both are raised to 80MHz
+  # together in the sdkconfig options above.
+  speed: 80MHz
 
 logger:
   level: DEBUG
