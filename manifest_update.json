@@ -5,10 +5,10 @@
     {
       "chipFamily": "ESP32",
       "ota": {
-        "md5": "00000000000000000000000000000000",
+        "md5": "244dee65c7ea128edc8cd029c863b296",
         "path": "https://github.com/mojansch/esphomeLuxe/releases/latest/download/muse-luxe.ota.bin",
         "offset": 0,
-        "summary": "Voice PE feature parity: FLAC media, announcement ducking, voice timers, stop word",
+        "summary": "Voice PE feature parity: FLAC media, announcement ducking, voice timers, Sendspin multi-room",
         "release_url": "https://github.com/mojansch/esphomeLuxe/releases/latest"
       }
     }

@@ -80,11 +80,24 @@ if $dry_run; then
   exit 0
 fi
 
-if gh release view "$tag" >/dev/null 2>&1; then
+# Resolve the repository from the origin remote. Without this, gh picks whichever
+# remote it likes and will happily aim at the upstream you forked from.
+repo=$(git remote get-url origin | sed -E 's#(git@github\.com:|https://github\.com/)##; s#\.git$##')
+echo "Publishing to ${repo}"
+
+# Create and push the tag with git rather than letting gh do it: gh's tag creation
+# goes through an API path that asks for the 'workflow' OAuth scope.
+if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+  git tag "$tag"
+fi
+git push --quiet origin "$tag"
+
+if gh release view "$tag" -R "$repo" >/dev/null 2>&1; then
   echo "Release ${tag} already exists; uploading over its assets."
-  gh release upload "$tag" "$OTA_ASSET" "$FACTORY_ASSET" --clobber
+  gh release upload "$tag" "$OTA_ASSET" "$FACTORY_ASSET" -R "$repo" --clobber
 else
   gh release create "$tag" "$OTA_ASSET" "$FACTORY_ASSET" \
+    -R "$repo" --verify-tag \
     --title "$tag" \
     --notes "Firmware ${version} for the Raspiaudio Muse Luxe, built with $(esphome version | head -1).
 
