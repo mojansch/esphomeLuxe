@@ -58,8 +58,8 @@ static const uint8_t ES8388_DAC_VOLUME_SILENT_REG = 192;
 /// a loss of level.
 static const float ES8388_DAC_VOLUME_MIN_DB = -49.0f;
 
-/// Output stage volume used for both routes. 0x1E is 0 dB, each step is 1 dB;
-/// 0x21 gives the Muse Luxe's amplifier a little headroom above unity.
+/// Output stage volume for both routes. Per the datasheet 0x1E is 0 dB and 0x21 is
+/// +4.5 dB, the maximum; the stock firmware used the maximum and so does this.
 static const uint8_t ES8388_OUTPUT_VOLUME = 0x21;
 
 }  // namespace esphome::es8388_luxe

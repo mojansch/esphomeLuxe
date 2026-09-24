@@ -31,7 +31,7 @@ esphome:
   name_add_mac_suffix: false
   project:
     name: raspiaudio.voice-assistant
-    version: "2026.9.0"
+    version: "2026.9.1"
   on_boot:
     priority: 375
     then:
@@ -220,7 +220,12 @@ speaker:
     id: mixing_speaker
     output_speaker: luxe_speaker
     num_channels: 2
-    task_stack_in_psram: true
+    # The mixer's task stack stays in internal RAM. The Voice PE puts it in PSRAM,
+    # but that board has octal PSRAM on an ESP32-S3; here PSRAM is quad and clocked
+    # at 40MHz, sharing a bus with flash. Every stack access in the mixing loop
+    # would cross it, and the mixer only does real work when an announcement and
+    # music play at once - exactly when the crackle appears. Raspiaudio's own
+    # firmware for this board does not set it either.
     source_speakers:
       - id: announcement_mixing_input
         timeout: never
@@ -1134,6 +1139,9 @@ script:
           timeout: 30s
       - script.execute: wait_for_bus_release
       - script.wait: wait_for_bus_release
+      # Re-check rather than trusting the wait above: if it timed out because media
+      # is still playing, starting detection anyway leaves the microphone driver
+      # retrying against a bus it will never get, once a second, indefinitely.
       - if:
           condition:
             and:
@@ -1141,6 +1149,12 @@ script:
               - api.connected:
               - not:
                   micro_wake_word.is_running:
+              - not:
+                  media_player.is_playing: external_media_player
+              - not:
+                  media_player.is_announcing: external_media_player
+              - not:
+                  voice_assistant.is_running:
           then:
             - micro_wake_word.start:
 
